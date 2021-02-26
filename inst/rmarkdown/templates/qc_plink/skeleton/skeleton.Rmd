@@ -4,10 +4,10 @@ params:
   author_name: "Firstname Lastname"
   author_affiliation: "Institution"
   author_email: "some@email.com"
-  input_files: NULL
-  output_directory: NULL
-  cohort_name: NULL
-  array: NULL
+  input_files: "/disks/DATA/Projects/PPPeQTL/IMIDIA/Omni2.5/PLINK_140420_1443/PPPeQTL" #NULL
+  output_directory: "/disks/DATATMP/SB_lning/qc_plink2" #NULL
+  cohort_name: "PPPeQTL" #NULL
+  array: "Illumina Omni2.5" #NULL
   callrate_samples: 0.95
   callrate_snps: 0.95
   sex_threshold: !r c(0.2, 0.8)
@@ -29,7 +29,7 @@ params:
   ref1kg_fasta: "/disks/DATA/ExternalData/1kg/hg19/human_g1k_v37.fasta"
   ref1kg_population: "/disks/DATA/ExternalData/1kg/samples_description/1kg_pop_description.tsv"
   ref1kg_genotypes: "/disks/DATA/ExternalData/1kg/hg19/Genotypes/RawPLINK/ALL/"
-  bin_path: !r list(bcftools = "/usr/bin/bcftools", bgzip = "/usr/bin/bgzip", plink = "/usr/bin/plink1.9", gcta = "/usr/bin/gcta64")
+  bin_path: !r list(bcftools = "/usr/bin/bcftools", bgzip = "/usr/bin/bgzip", plink = "/disks/PROJECT/SB_lning/git_repo/plink2")
 title: '`r params[["title"]]`'
 author:
 - name: '`r params[["author_name"]]`'
@@ -77,17 +77,17 @@ suppressPackageStartupMessages({
   library("bookdown")
   library("data.table")
   library("ggplot2")
-  library("ggforce")
-  library("ggrepel")
-  library("ggtext")
+  # library("ggforce")
+  # library("ggrepel")
+  # library("ggtext")
   library("gt")
   library("knitr")
   library("parallel")
-  library("patchwork")
+  # library("patchwork")
   library("scales")
   library("stats")
   library("sessioninfo")
-  library("writexl")
+  # library("writexl")
 })
 
 
@@ -198,14 +198,14 @@ if (length(list.files(dirname(params[["input_files"]]), pattern = ".bed")) != 0)
   sys(paste(plink, 
     "--bfile", params[["input_files"]], 
     "--snps-only", 
-    "--make-bed",
+    "--make-pgen psam-cols=fid,parents,sex,pheno1,phenos",
     "--out", file.path(temp, "data")
   ))
 } else {
   sys(paste(plink, 
     "--file", params[["input_files"]], 
     "--snps-only", 
-    "--make-bed",
+    "--make-pgen psam-cols=fid,parents,sex,pheno1,phenos",
     "--out", file.path(temp, "data")
   ))
 }
@@ -238,7 +238,7 @@ if (length(list.files(dirname(params[["input_files"]]), pattern = ".bed")) != 0)
 * Mendelian error rate threshold:
     + Maximum per-trio error rate: 
         `` `r if (params[["includes_relatives"]]) params[["mendelian_samples"]] else "not applicable"` `` 
-    + Ma per-variant error rate: 
+    + Maximum per-variant error rate: 
         `` `r if (params[["includes_relatives"]]) params[["mendelian_snps"]] else "not applicable"` `` 
 
 # Cohort Overview
@@ -247,7 +247,7 @@ Genotyped using `r if (is.null(params[["array"]])) "unspecified" else params[["a
 
 ```{r cohort-overview, include = FALSE}
 fam_data <- data.table::fread(
-  file = file.path(temp, "data.fam"), 
+  file = file.path(temp, "data.psam"), 
   col.names = c("FID", "IID", "father_id", "mother_id", "sex", "phenotype"),
   colClasses = c("character", "character", "character", "character", "numeric", "numeric")
 )
@@ -301,47 +301,52 @@ Call rate was computed using the `--missing` command in PLINK.
 
 ```{r sample-call-rate}
 sys(paste(plink, 
-  "--bfile", file.path(temp, "data"), 
+  "--pfile", file.path(temp, "data"), 
   "--missing", 
   "--out", file.path(temp, "data")
 ))
 
 callrate_samples <- data.table::fread(
-  file = file.path(temp, "data.imiss"), 
-  colClasses = c("FID" = "character", "IID" = "character")
+  file = file.path(temp, "data.smiss"), 
+  colClasses = c("#FID" = "character", "IID" = "character")
 )[, labs := data.table::fifelse(F_MISS > 1 - params[["callrate_samples"]], IID, NA_character_)][order(F_MISS)]
+data.table::setnames(callrate_samples, old = "#FID", new = "FID")
 samples_to_exclude <- callrate_samples[!is.na(labs), .(FID, IID)]
 samples_to_exclude[, QC := "Sample_Call_Rate"]
 
 sys(paste(plink, 
-  "--bfile", file.path(temp, "data"), 
+  "--pfile", file.path(temp, "data"), 
   "--freq", 
   "--out", file.path(temp, "data")
 ))
 
-freqsnp <- data.table::fread(file.path(temp, "data.frq"))
+freqsnp <- data.table::fread(
+  file = file.path(temp, "data.afreq"), 
+  colClasses = c("ALT_FREQS" = "numeric", "OBS_CT" = "numeric")
+)[, MAF := min(ALT_FREQS, 1 - ALT_FREQS), by = "ID"]
+data.table::setnames(freqsnp, old = "#CHROM", new = "CHROM")
 
 data.table::fwrite(
-  x = freqsnp[MAF >= params[["maf_threshold"]], .(SNP)],
+  x = freqsnp[MAF >= params[["maf_threshold"]], .(ID)], 
   file = file.path(temp, "data_maf_geq.txt"),
   col.names = FALSE, 
   row.names = FALSE, 
   quote = FALSE
 )
 
-data_maf_lower <- freqsnp[MAF < params[["maf_threshold"]], .(SNP)]
+data_maf_lower <- freqsnp[MAF < params[["maf_threshold"]], .(ID)]
 is_maf_lower <- nrow(data_maf_lower) > 0
 
 sys(paste(plink, 
-  "--bfile", file.path(temp, "data"), 
+  "--pfile", file.path(temp, "data"), 
   "--missing", 
   "--extract", file.path(temp, "data_maf_geq.txt"), 
   "--out", file.path(temp, "data_maf_geq")
 ))
 
 callrate_samples_geq <- data.table::fread(
-  file = file.path(temp, "data_maf_geq.imiss"),
-  colClasses = c("FID" = "character", "IID" = "character")
+  file = file.path(temp, "data_maf_geq.smiss"),
+  colClasses = c("#FID" = "character", "IID" = "character")
 )[order(F_MISS)]
 prop_all <- sum(callrate_samples[, "F_MISS"] > 1 - params[["callrate_samples"]]) / nrow(callrate_samples)
 prop_maf_geq <- sum(callrate_samples_geq[, "F_MISS"] > 1 - params[["callrate_samples"]]) / nrow(callrate_samples_geq)
@@ -356,14 +361,14 @@ if (is_maf_lower) {
     quote = FALSE
   )
   sys(paste(plink, 
-    "--bfile", file.path(temp, "data"), 
+    "--pfile", file.path(temp, "data"), 
     "--missing", 
     "--extract", file.path(temp, "data_maf_lower.txt"), 
     "--out", file.path(temp, "data_maf_lower")
   ))
   callrate_samples_lower <- data.table::fread(
-    file = file.path(temp, "data_maf_lower.imiss"),
-    colClasses = c("FID" = "character", "IID" = "character")
+    file = file.path(temp, "data_maf_lower.smiss"),
+    colClasses = c("#FID" = "character", "IID" = "character")
   )[order(F_MISS)]
   prop_maf_lower <- sum(callrate_samples_lower[, "F_MISS"] > 1 - params[["callrate_samples"]]) / nrow(callrate_samples_lower)
   prop_diff_maf_lower <- abs((prop_maf_lower - prop_all) / prop_all) >= 0.05
@@ -496,8 +501,8 @@ The mean homozygosity rate across the X-chromosome was computed using the `--che
 
 ```{r sex-check}
 sys(paste(plink, 
-  "--bfile", file.path(temp, "data"), 
-  "--check-sex", min(params[["sex_threshold"]]), max(params[["sex_threshold"]]),
+  "--pfile", file.path(temp, "data"), 
+  "--check-sex", min(params[["sex_threshold"]]), max(params[["sex_threshold"]]), # Unrecognized flag ('--check-sex')
   "--out", file.path(temp, "data")
 ))
 
