@@ -254,7 +254,7 @@ fam_data <- data.table::fread(
 
 samples_duplicated <- sum(table(gsub("[_-][^-_]*$", "", fam_data[["IID"]])) > 1)
 
-snps_number <- nrow(data.table::fread(input = file.path(temp, "data.bim"), select = 1))
+snps_number <- nrow(data.table::fread(input = file.path(temp, "data.pvar"), select = 1))
 
 fam_data[, cohort := params[["cohort_name"]]]
 fam_data[, sex_fct := factor(sex, levels = c(1, 2, 0), labels = c("Male", "Female", "Unspecified"))]
@@ -502,10 +502,10 @@ The mean homozygosity rate across the X-chromosome was computed using the `--che
 ```{r sex-check}
 sys(paste(plink, 
   "--pfile", file.path(temp, "data"), 
-  "--check-sex", min(params[["sex_threshold"]]), max(params[["sex_threshold"]]), # Unrecognized flag ('--check-sex')
+  "--check-sex", min(params[["sex_threshold"]]), max(params[["sex_threshold"]]), # Unrecognized flag
   "--out", file.path(temp, "data")
 ))
-
+# to manually calculate homozygosity rate on X?
 sex_file_check <- file.exists(file.path(temp, "data.sexcheck"))
 
 if (!sex_file_check) {
@@ -645,7 +645,7 @@ N(NM) and O(Hom) were obtained using the `--het` command in PLINK.
 
 ```{r heterozygosity, include = FALSE}
 sys(paste(plink, 
-  "--bfile", file.path(temp, "data"), 
+  "--pfile", file.path(temp, "data"), 
   "--het",
   "--out", file.path(temp, "data_het")
 ))
@@ -653,14 +653,15 @@ sys(paste(plink,
 heterozygosity <- merge(
   x = data.table::fread(
     file = file.path(temp, "data_het.het"),
-    colClasses = c("FID" = "character", "IID" = "character"), 
+    col.names = c("FID", "IID", "O_HOM", "E_HOM", "OBS_CT", "COEF_F"),
+    colClasses = c("#FID" = "character", "IID" = "character"), 
     check.names = TRUE
   ), 
-  y = callrate_samples, 
+  y = callrate_samples[, .(FID, IID, F_MISS)], 
   by = c("FID", "IID"), 
   all = TRUE
 )
-heterozygosity[, hrate := (N.NM. - O.HOM.) / N.NM., by = F_MISS < 1 - params[["callrate_samples"]]]
+heterozygosity[, hrate := (OBS_CT - O_HOM) / OBS_CT, by = F_MISS < 1 - params[["callrate_samples"]]]
 heterozygosity[, colour := sqrt( (hrate - mean(hrate, na.rm = TRUE))^2 + (F_MISS - mean(F_MISS, na.rm = TRUE))^2 ), by = F_MISS < 1 - params[["callrate_samples"]]]
 heterozygosity[, 
   labs := data.table::fifelse(
@@ -681,7 +682,7 @@ samples_to_exclude <- rbind(
 
 if (is_maf_lower) {
   sys(paste(plink, 
-    "--bfile", file.path(temp, "data"),
+    "--pfile", file.path(temp, "data"),
     "--extract", file.path(temp, "data_maf_lower.txt"),
     "--het",
     "--out", file.path(temp, "data_het_maf_lower")
@@ -690,14 +691,15 @@ if (is_maf_lower) {
   heterozygosity_maf_lower <- merge(
     x = data.table::fread(
       file = file.path(temp, "data_het_maf_lower.het"),
-      colClasses = c("FID" = "character", "IID" = "character"), 
+      col.names = c("FID", "IID", "O_HOM", "E_HOM", "OBS_CT", "COEF_F"),
+      colClasses = c("#FID" = "character", "IID" = "character"), 
       check.names = TRUE
     ), 
-    y = callrate_samples, 
+    y = callrate_samples[, .(FID, IID, F_MISS)], 
     by = c("FID", "IID"), 
     all = TRUE
   )
-  heterozygosity_maf_lower[, hrate := (N.NM. - O.HOM.) / N.NM., by = F_MISS < 1 - params[["callrate_samples"]]]
+  heterozygosity_maf_lower[, hrate := (OBS_CT - O_HOM) / OBS_CT, by = F_MISS < 1 - params[["callrate_samples"]]]
   heterozygosity_maf_lower[, 
     colour := sqrt( (hrate - mean(hrate, na.rm = TRUE))^2 + (F_MISS - mean(F_MISS, na.rm = TRUE))^2 ), 
     by = F_MISS < 1 - params[["callrate_samples"]]
@@ -802,7 +804,7 @@ if (is_maf_lower) {
 ```
 
 ```{r heterozygosity-tab, eval = nrow(heterozygosity[!is.na(labs)]) > 0}
-heterozygosity[!is.na(labs), .(FID, IID, O.HOM., E.HOM., N.NM., hrate)] %>% 
+heterozygosity[!is.na(labs), .(FID, IID, O_HOM, E_HOM, OBS_CT, hrate)] %>% 
   gt::gt(auto_align = "center") %>% 
   gt::tab_header(paste(
     "Samples To Be Excluded For An Heterozygosity Rate Higher Than", params[["heterozygosity_threshold"]], 
@@ -830,27 +832,25 @@ Pairs of sample with $\hat{\pi}$ ("PI_HAT") greater than `r params[["ibd_thresho
 ```{r relatedness, eval = !params[["includes_relatives"]], include = FALSE}
 ## Pruning Data
 sys(paste(plink, 
-  "--bfile", file.path(temp, "data"), 
+  "--pfile", file.path(temp, "data"), 
   "--autosome", 
   "--set-hh-missing", 
   "--maf", params[["maf_threshold"]], 
-  "--r2", 
-  "--ld-window-r2 0.2", 
-  "--ld-window-kb 50", 
-  "--make-bed",
+  "--indep-pairwise 50 1 0.2", # <window size>['kb'] [step size (variant ct)] <unphased-hardcall-r^2 threshold>
+  "--make-pgen",
   "--out", file.path(temp, "data_pruned")
 ))
 
 sys(paste(plink, 
-  "--bfile", file.path(temp, "data_pruned"), 
+  "--pfile", file.path(temp, "data_pruned"), 
   "--freq", 
   "--out ", file.path(temp, "data_pruned")
 ))
 
-sys(paste(plink, 
-  "--bfile", file.path(temp, "data_pruned"), 
-  "--read-freq", file.path(temp, "data_pruned.frq"), 
-  "--genome", 
+sys(paste(plink,
+  "--pfile", file.path(temp, "data_pruned"), 
+  "--read-freq", file.path(temp, "data_pruned.afreq"), 
+  "--genome", # Unrecognized flag
   "--min", params[["ibd_threshold"]],  
   "--out", file.path(temp, "data_pruned_freq")
 ))
@@ -961,8 +961,8 @@ imendel_file_check <- params[["includes_relatives"]]
 
 ```{r imendel-error-tab, eval = params[["includes_relatives"]]}
 sys(paste(plink, 
-  "--bfile", file.path(temp, "data"), 
-  "--mendel",
+  "--pfile", file.path(temp, "data"), 
+  "--mendel", # Unrecognized flag
   "--out ", file.path(temp, "data") 
 ))
 
@@ -1157,7 +1157,7 @@ The data from the **`r params[["cohort_name"]]`** cohort was pruned using the fo
 
 ```{r ancestry-inference, include = FALSE}
 data.table::fwrite(
-  x = data.table::fread(file.path(temp, "data.bim"))[V1 %in% 1:22, .(V2)],
+  x = data.table::fread(file.path(temp, "data.pvar"))[`#CHROM` %in% 1:22, .(ID)],
   file = file.path(temp, "data.txt"),
   quote = FALSE, 
   col.names = FALSE, 
@@ -1177,34 +1177,34 @@ data.table::fwrite(
 
 if (nrow(samples_to_exclude_pca) > 0) {
   sys(paste(plink, 
-    "--bfile", file.path(temp, "data"),
+    "--pfile", file.path(temp, "data"),
     "--remove", file.path(temp, "samples_to_exclude_pca.txt"),
     "--extract", file.path(temp, "data.txt"),
     "--snps-only",
     "--maf", params[["maf_threshold"]], 
     "--hwe", params[["hwe_pvalue"]], 
     "--geno 0.1", 
-    "--make-bed",
+    "--make-pgen",
     "--out", file.path(temp, "data_pop")
   ))
 } else {
   sys(paste(plink, 
-    "--bfile", file.path(temp, "data"), 
+    "--pfile", file.path(temp, "data"), 
     "--extract", file.path(temp, "data.txt"),
     "--snps-only",
     "--maf", params[["maf_threshold"]], 
     "--hwe", params[["hwe_pvalue"]], 
     "--geno 0.1", 
-    "--make-bed",
+    "--make-pgen",
     "--out", file.path(temp, "data_pop")
   ))
 }
 
 data.table::fwrite(
-  x = data.table::fread(file.path(temp, "data_pop.bim"))[
-    !paste(V1, V4) %in% unique(paste(V1, V4)[duplicated(paste(V1, V4))]) &
-      !V2 %in% unique(V2[duplicated(V2)]), 
-    .(V2)
+  x = data.table::fread(file.path(temp, "data_pop.pvar"))[
+    !paste(`#CHROM`, POS) %in% unique(paste(`#CHROM`, POS)[duplicated(paste(`#CHROM`, POS))]) &
+      !ID %in% unique(ID[duplicated(ID)]), 
+    .(ID)
   ],
   file = file.path(temp, "clean_data_snp.txt"),
   row.names = FALSE, 
@@ -1217,21 +1217,21 @@ invisible(parallel::mclapply(1:22, mc.cores = min(parallel::detectCores(), 22), 
     "--bfile", paste0(params[["ref1kg_genotypes"]], "Chr", i),
     "--extract", file.path(temp, "clean_data_snp.txt"),
     "--snps-only",
-    "--make-bed",
+    "--make-pgen",
     "--out", file.path(temp, file.path("1kgenome_pruned", sprintf("1kgenome_pruned_chr%02d_tmp", i)))
   ))
   data.table::fwrite(
-    x = data.table::fread(file.path(temp, file.path("1kgenome_pruned", sprintf("1kgenome_pruned_chr%02d_tmp.bim", i))))[duplicated(V2), .(V2)],
+    x = data.table::fread(file.path(temp, file.path("1kgenome_pruned", sprintf("1kgenome_pruned_chr%02d_tmp.pvar", i))))[duplicated(ID), .(ID)],
     file = file.path(temp, file.path("1kgenome_pruned", sprintf("1kgenome_pruned_chr%02d_tmp.dupvar", i))),
     col.names = FALSE, 
     row.names = FALSE, 
     quote = FALSE
   )
   sys(paste(plink, 
-    "--bfile", file.path(temp, file.path("1kgenome_pruned", sprintf("1kgenome_pruned_chr%02d_tmp", i))),
+    "--pfile", file.path(temp, file.path("1kgenome_pruned", sprintf("1kgenome_pruned_chr%02d_tmp", i))),
     "--exclude", file.path(temp, file.path("1kgenome_pruned", sprintf("1kgenome_pruned_chr%02d_tmp.dupvar", i))), 
     "--snps-only",
-    "--make-bed", 
+    "--make-pgen", 
     "--out", file.path(temp, file.path("1kgenome_pruned", sprintf("1kgenome_pruned_chr%02d", i)))
   ))
 }))
@@ -1245,7 +1245,7 @@ data.table::fwrite(
   quote = FALSE
 )
 out <- file.path(temp, "1kgenome_pruned", "1kgenome_pruned_complete")
-sys(paste(plink, "--merge-list", list_1kgenome, "--out", out))
+sys(paste(plink, "--pmerge-list", list_1kgenome, "--out", out)) # Segmentation fault (core dumped)
 
 if (file.exists(paste0(out, "-merge.missnp"))) {
   parallel::mclapply(1:22, mc.cores = min(parallel::detectCores(), 22), function(i) {
@@ -1254,34 +1254,34 @@ if (file.exists(paste0(out, "-merge.missnp"))) {
       "--exclude", paste0(out, "-merge.missnp"),
       "--extract", file.path(temp, "clean_data_snp.txt"), 
       "--snps-only",
-      "--make-bed",
+      "--make-pgen",
       "--out", file.path(temp, "1kgenome_pruned", paste0("1kgenome_pruned_chr", sprintf("%02d", i)))
     ))
   })
   sys(paste(plink, 
-    "--bfile", first_chromosome, 
+    "--pfile", first_chromosome, 
     "--exclude", paste0(out, "-merge.missnp"), 
-    "--merge-list", list_1kgenome, 
+    "--pmerge-list", list_1kgenome, 
     "--snps-only",
-    "--make-bed", 
+    "--make-pgen", 
     "--out", out
   ))
 }
 
 sys(paste(plink, 
-  "--bfile", file.path(temp, "1kgenome_pruned", "1kgenome_pruned_complete"),
-  "--bmerge", 
+  "--pfile", file.path(temp, "1kgenome_pruned", "1kgenome_pruned_complete"),
+  "--pmerge", 
     file.path(temp, "data_pop.bed"), 
     file.path(temp, "data_pop.bim"),
     file.path(temp, "data_pop.fam"), 
-  "--make-bed", 
+  "--make-pgen", 
   "--out", file.path(temp, "data_1kgenome")
 ))
 
 sys(paste(plink, 
   "--bfile", file.path(temp, "1kgenome_pruned", "1kgenome_pruned_complete"),
   "--flip", file.path(temp, "data_1kgenome-merge.missnp"), 
-  "--make-bed",
+  "--make-pgen",
   "--out", file.path(temp, "1kgenome_pruned", "1kgenome_pruned_flipped")
 ))
 
